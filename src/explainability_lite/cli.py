@@ -9,7 +9,9 @@ import sys
 import numpy as np
 
 from .attribution import _METHODS, explain
+from .effects import partial_dependence, pdp_table
 from .models import check_model, load_model, make_demo_model
+from .plots import save_pdp_png
 from .report import ascii_bar_chart, html_report, markdown_table
 
 
@@ -57,6 +59,27 @@ def build_parser() -> argparse.ArgumentParser:
     e.add_argument("--seed", type=int, default=42, help="Random seed (default: 42).")
     e.add_argument("--samples", type=int, default=1000,
                    help="Perturbation samples for lime/shap (default: 1000).")
+
+    d = sub.add_parser("pdp", help="Partial dependence curve for one feature.")
+    d.add_argument("--csv", required=True, help="CSV file with header + numeric rows.")
+    d.add_argument("--feature", required=True,
+                   help="Feature name (or 0-based index) to sweep.")
+    d.add_argument("--model", default="demo",
+                   help="'demo' for the built-in demo model, or 'module.path:attr' "
+                        "for your own object with predict(X).")
+    d.add_argument("--grid-points", type=int, default=20,
+                   help="Grid resolution for the sweep (default: 20).")
+    d.add_argument("--ice", action="store_true",
+                   help="Include per-row ICE lines (PNG output only).")
+    d.add_argument("--max-rows", type=int, default=200,
+                   help="Subsample the reference set to this many rows (default: 200).")
+    d.add_argument("--format", default="ascii", choices=["ascii", "png"],
+                   help="Output format (default: ascii). png needs matplotlib: "
+                        "pip install explainability-lite[plots].")
+    d.add_argument("--out", default=None,
+                   help="Output file (png format writes here; defaults to pdp.png). "
+                        "Use '-' for stdout (ascii only).")
+    d.add_argument("--seed", type=int, default=42, help="Random seed (default: 42).")
 
     sub.add_parser("methods", help="List available attribution methods.")
     return p
@@ -112,7 +135,7 @@ def cmd_explain(args: argparse.Namespace) -> int:
     if "html" in want:
         outputs["html"] = html_report(
             attr,
-            title=f"Feature Attribution — row {args.row} ({args.method})",
+            title=f"Feature Attribution - row {args.row} ({args.method})",
             feature_values=feature_values,
             top_k=args.top_k,
         )
@@ -137,6 +160,42 @@ def cmd_explain(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_pdp(args: argparse.Namespace) -> int:
+    feature_names, X = load_csv(args.csv)
+    try:
+        feature: int | str = int(args.feature)
+    except ValueError:
+        feature = args.feature
+    model = _resolve_model(args.model, feature_names)
+    pd = partial_dependence(
+        model,
+        X,
+        feature,
+        feature_names=feature_names,
+        n_grid=args.grid_points,
+        include_ice=args.ice,
+        max_rows=args.max_rows,
+        random_state=args.seed,
+    )
+    if args.format == "ascii":
+        text = pdp_table(pd)
+        if args.out in (None, "-"):
+            print(text)
+        else:
+            with open(args.out, "w", encoding="utf-8") as fh:
+                fh.write(text + "\n")
+            print(f"wrote {args.out}")
+        return 0
+    out_path = args.out or "pdp.png"
+    try:
+        save_pdp_png(pd, out_path, show_ice=args.ice)
+    except ImportError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 2
+    print(f"wrote {out_path}")
+    return 0
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -144,9 +203,12 @@ def main(argv: list[str] | None = None) -> int:
         print("Available attribution methods:")
         for name in sorted(_METHODS):
             print(f"  {name}")
+        print("\nGlobal effect curves: partial_dependence (see `pdp` command).")
         return 0
     if args.command == "explain":
         return cmd_explain(args)
+    if args.command == "pdp":
+        return cmd_pdp(args)
     parser.print_help()
     return 0
 

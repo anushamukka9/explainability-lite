@@ -1,4 +1,4 @@
-"""Quickstart example: explain a prediction four different ways.
+"""Quickstart example: explain a prediction five different ways.
 
 Run from the repo root after installing:
 
@@ -29,7 +29,7 @@ def main() -> None:
     row = np.array([2.5, 3.0, 1.0, 0.5, 0.0])
     print(f"Prediction for the row: {model.predict(row.reshape(1, -1))[0]:.4f}\n")
 
-    for method in ("ablation", "lime", "shap"):
+    for method in ("ablation", "lime", "shap", "kernel_shap"):
         attr = explain(method, model, row, X, feature_names=feature_names, random_state=42)
         print("=" * 64)
         print(ascii_bar_chart(attr))
@@ -51,7 +51,7 @@ def main() -> None:
         title="Quickstart: SHAP-style attribution",
         feature_values=dict(zip(feature_names, row.tolist())),
     )
-    print(f"\nHTML report written to {path} — open it in a browser.")
+    print(f"\nHTML report written to {path} - open it in a browser.")
 
 
 if __name__ == "__main__":

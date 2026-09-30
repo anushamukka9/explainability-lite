@@ -80,7 +80,7 @@ def make_demo_model(
     """Build a reproducible demo model where some features push positive.
 
     The first few ``positive``-named features get weight +0.9, the rest get
-    small random weights, so the true importance ranking is roughly known —
+    small random weights, so the true importance ranking is roughly known:
     a good ground truth for trying out the attribution methods.
     """
     rng = np.random.default_rng(seed)
@@ -98,7 +98,7 @@ def load_model(spec: str):
 
     ``"demo"`` builds a small :class:`DemoTabularModel` from the CSV header
     (done in the CLI where the feature names are known). Any other spec is
-    ``"module.path:attr"`` — import the module and grab the attribute, which
+    ``"module.path:attr"`` - import the module and grab the attribute, which
     must expose ``predict(X)``.
     """
     if spec == "demo":

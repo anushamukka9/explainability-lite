@@ -7,3 +7,5 @@ build/
 .venv/
 .pytest_cache/
 report.html
+example_report.html
+examples/output/

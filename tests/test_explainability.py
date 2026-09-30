@@ -132,3 +132,209 @@ def test_attribution_ranked_and_dict():
     assert d["method"] == "x" and len(d["features"]) == 3
     with pytest.raises(ValueError):
         Attribution(["a"], np.array([1.0, 2.0]), method="x")  # length mismatch
+
+
+# ---------------------------------------------------------------------------
+# New: kernel_shap, partial dependence, PNG plots, pdp CLI
+# ---------------------------------------------------------------------------
+
+import numpy as np  # noqa: E402
+import pytest  # noqa: E402
+
+from explainability_lite import (  # noqa: E402
+    PartialDependence,
+    kernel_shap_attribution,
+    partial_dependence,
+    pdp_table,
+)
+
+
+class _LinearModel:
+    """f(x) = w.x + b: Shapley values are exactly w_j * (row_j - base_j)."""
+
+    def __init__(self, w, b=0.0):
+        self.w = np.asarray(w, dtype=float)
+        self.b = float(b)
+
+    def predict(self, X):
+        return np.asarray(X, dtype=float) @ self.w + self.b
+
+
+def test_kernel_shap_additivity():
+    names, X, y, model = _dataset()
+    row = X[3]
+    attr = kernel_shap_attribution(model, row, X, feature_names=names)
+    assert attr.method == "kernel_shap"
+    total = float(np.sum(attr.values))
+    expected = float(attr.prediction - attr.baseline)
+    assert total == pytest.approx(expected, abs=1e-8)
+
+
+def test_kernel_shap_matches_linear_ground_truth():
+    rng = np.random.default_rng(3)
+    w = np.array([2.0, -1.5, 0.5])
+    model = _LinearModel(w, b=0.25)
+    X = rng.normal(0, 1, size=(100, 3))
+    row = np.array([1.0, -2.0, 0.5])
+    attr = kernel_shap_attribution(model, row, X, baseline="zeros")
+    expected = w * row  # baseline is the zero vector
+    np.testing.assert_allclose(attr.values, expected, rtol=1e-6, atol=1e-8)
+
+
+def test_kernel_shap_is_deterministic():
+    names, X, y, model = _dataset()
+    a = kernel_shap_attribution(model, X[5], X, feature_names=names)
+    b = kernel_shap_attribution(model, X[5], X, feature_names=names)
+    np.testing.assert_array_equal(a.values, b.values)
+
+
+def test_kernel_shap_rejects_too_many_features():
+    names, X, y, model = _dataset()
+    with pytest.raises(ValueError, match="max_features"):
+        kernel_shap_attribution(model, X[0], X, max_features=4)
+
+
+def test_kernel_shap_single_feature():
+    model = _LinearModel([3.0], b=1.0)
+    X = np.array([[0.0], [1.0], [2.0]])
+    attr = kernel_shap_attribution(model, np.array([2.0]), X, baseline="zeros")
+    assert attr.values == pytest.approx([6.0])
+
+
+def test_explain_dispatches_kernel_shap():
+    names, X, y, model = _dataset()
+    attr = explain("kernel_shap", model, X[1], X, feature_names=names)
+    assert attr.method == "kernel_shap"
+    assert len(attr.values) == len(names)
+
+
+def test_partial_dependence_shapes_and_monotonicity():
+    names, X, y, model = _dataset()
+    pd = partial_dependence(model, X, "income", feature_names=names, n_grid=15)
+    assert isinstance(pd, PartialDependence)
+    assert pd.feature_name == "income" and pd.feature_index == 0
+    assert pd.grid.shape == (15,)
+    assert pd.mean_prediction.shape == (15,)
+    assert pd.ice is None
+    # income has a positive weight: the PDP curve must rise with income
+    assert np.all(np.diff(pd.mean_prediction) > 0)
+
+
+def test_partial_dependence_by_index_and_ice():
+    names, X, y, model = _dataset()
+    pd = partial_dependence(model, X, 1, feature_names=names, n_grid=10,
+                            include_ice=True, max_rows=50)
+    assert pd.feature_name == "debt"
+    assert pd.ice is not None and pd.ice.shape == (50, 10)
+    # PDP is the mean of the ICE lines
+    np.testing.assert_allclose(pd.mean_prediction, pd.ice.mean(axis=0))
+
+
+def test_partial_dependence_is_deterministic():
+    names, X, y, model = _dataset()
+    a = partial_dependence(model, X, "age", feature_names=names)
+    b = partial_dependence(model, X, "age", feature_names=names)
+    np.testing.assert_array_equal(a.mean_prediction, b.mean_prediction)
+
+
+def test_partial_dependence_rejects_bad_feature():
+    names, X, y, model = _dataset()
+    with pytest.raises(ValueError, match="unknown feature"):
+        partial_dependence(model, X, "nope", feature_names=names)
+    with pytest.raises(ValueError, match="out of range"):
+        partial_dependence(model, X, 99, feature_names=names)
+    Xc = X.copy()
+    Xc[:, 3] = 1.0  # constant column
+    with pytest.raises(ValueError, match="constant"):
+        partial_dependence(model, Xc, "tenure", feature_names=names)
+
+
+def test_pdp_table_renders():
+    names, X, y, model = _dataset()
+    pd = partial_dependence(model, X, "income", feature_names=names, n_grid=8)
+    text = pdp_table(pd)
+    assert "Partial dependence: income" in text
+    assert text.count("*") == 8
+    assert isinstance(pd.as_dict()["grid"], list)
+
+
+def test_save_attribution_png(tmp_path):
+    pytest.importorskip("matplotlib")
+    from explainability_lite import save_attribution_png
+
+    names, X, y, model = _dataset()
+    attr = explain("shap", model, X[0], X, feature_names=names)
+    out = tmp_path / "attr.png"
+    returned = save_attribution_png(attr, str(out), top_k=3)
+    assert returned == str(out)
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_save_pdp_png(tmp_path):
+    pytest.importorskip("matplotlib")
+    from explainability_lite import save_pdp_png
+
+    names, X, y, model = _dataset()
+    pd = partial_dependence(model, X, "income", feature_names=names,
+                            include_ice=True)
+    out = tmp_path / "pdp.png"
+    save_pdp_png(pd, str(out))
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_plots_raise_helpful_error_without_matplotlib(monkeypatch):
+    import sys
+
+    from explainability_lite import plots
+
+    monkeypatch.setitem(sys.modules, "matplotlib", None)
+    monkeypatch.setitem(sys.modules, "matplotlib.pyplot", None)
+    names, X, y, model = _dataset()
+    attr = explain("ablation", model, X[0], X, feature_names=names)
+    with pytest.raises(ImportError, match="explainability-lite\\[plots\\]"):
+        plots.save_attribution_png(attr, "x.png")
+
+
+def _write_demo_csv(path):
+    import csv
+
+    rng = np.random.default_rng(11)
+    X = rng.normal(0, 1, size=(30, 3))
+    with open(path, "w", newline="") as fh:
+        w = csv.writer(fh)
+        w.writerow(["a", "b", "c"])
+        w.writerows(X.tolist())
+
+
+def test_cli_pdp_ascii(tmp_path, capsys):
+    from explainability_lite.cli import main
+
+    csv_path = tmp_path / "data.csv"
+    _write_demo_csv(csv_path)
+    rc = main(["pdp", "--csv", str(csv_path), "--feature", "a",
+               "--grid-points", "6", "--out", "-"])
+    assert rc == 0
+    out = capsys.readouterr().out
+    assert "Partial dependence: a" in out
+    assert out.count("*") == 6
+
+
+def test_cli_pdp_png(tmp_path):
+    pytest.importorskip("matplotlib")
+    from explainability_lite.cli import main
+
+    csv_path = tmp_path / "data.csv"
+    _write_demo_csv(csv_path)
+    out = tmp_path / "pdp.png"
+    rc = main(["pdp", "--csv", str(csv_path), "--feature", "b",
+               "--format", "png", "--out", str(out), "--ice"])
+    assert rc == 0
+    assert out.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+
+
+def test_cli_methods_lists_new_method(capsys):
+    from explainability_lite.cli import main
+
+    assert main(["methods"]) == 0
+    out = capsys.readouterr().out
+    assert "kernel_shap" in out

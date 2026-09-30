@@ -1,8 +1,8 @@
 # explainability-lite
 
-Model-agnostic **local feature attributions** for tabular data, with reports you can actually share.
+Model-agnostic **feature attributions and effect curves** for tabular data, with reports you can actually share.
 
-Explain any prediction — from any model with a `predict(X)` method — using four attribution methods, then render the result as an ASCII bar chart, a Markdown table, or a standalone HTML report with an inline SVG chart.
+Explain any prediction, from any model with a `predict(X)` method, using five attribution methods, then render the result as an ASCII bar chart, a Markdown table, a PNG plot, or a standalone HTML report with an inline SVG chart. Zoom out with permutation importance and partial dependence curves to see how the model behaves globally.
 
 ## Methods
 
@@ -12,13 +12,23 @@ Explain any prediction — from any model with a `predict(X)` method — using f
 | `ablation` | local | Replace each feature with its baseline, measure the prediction change |
 | `lime` | local | LIME-style: sample around the instance, fit a weighted linear surrogate |
 | `shap` | local | SHAP-like: average marginal contributions over random permutations (adds up to `f(row) − f(baseline)`) |
+| `kernel_shap` | local | KernelSHAP: exact Shapley values for small feature sets via the Shapley kernel (deterministic, adds up to `f(row) − f(baseline)`) |
 
-Only dependency: **numpy**.
+Global effect curves live in `explainability_lite.effects`:
+
+| Tool | Scope | Idea |
+|---|---|---|
+| `partial_dependence` | global | Sweep one feature across its range, average predictions (PDP); optional per-row ICE lines |
+
+Only required dependency: **numpy**. PNG plots need matplotlib
+(`pip install explainability-lite[plots]`), which works headless via the Agg
+backend - no display server needed.
 
 ## Install
 
 ```bash
 pip install -e .
+pip install -e ".[plots]"   # optional: PNG plotting helpers
 ```
 
 ## Quickstart
@@ -39,10 +49,13 @@ print(ascii_bar_chart(attr))
 save_html_report(attr, "report.html", feature_values=dict(zip(names, row)))
 ```
 
-Or run the bundled example:
+Or run the bundled examples:
 
 ```bash
-python examples/quickstart.py
+python examples/quickstart.py        # five attribution methods, one row
+python examples/toy_dataset_demo.py  # worked example on a toy loan dataset:
+                                     # permutation importance, PDP curves
+                                     # (ASCII + PNG), KernelSHAP, HTML report
 ```
 
 ## CLI
@@ -54,6 +67,9 @@ explainability-lite methods
 # Explain row 3 of a CSV with the demo model
 explainability-lite explain --csv data.csv --row 3 --method lime
 
+# Exact Shapley values for a small feature set
+explainability-lite explain --csv data.csv --row 3 --method kernel_shap
+
 # SHAP-style explanation as a standalone HTML report, your own model
 explainability-lite explain --csv data.csv --row 3 --method shap \
     --model mypackage.models:risk_model --baseline median \
@@ -62,6 +78,13 @@ explainability-lite explain --csv data.csv --row 3 --method shap \
 # Global permutation importance (needs a label column)
 explainability-lite explain --csv data.csv --row 0 --method permutation \
     --label-column approved --format markdown
+
+# Partial dependence curve for one feature (ASCII table)
+explainability-lite pdp --csv data.csv --feature income
+
+# ... or as a PNG with ICE lines (needs the plots extra)
+explainability-lite pdp --csv data.csv --feature income --ice \
+    --format png --out pdp_income.png
 ```
 
 The `--model` spec is either `demo` (built-in demo model) or `module.path:attribute`
@@ -72,12 +95,17 @@ for any object exposing `predict(X)`.
 ```python
 from explainability_lite import (
     Attribution,            # result container: .values, .ranked(), .as_dict()
+    PartialDependence,      # result container for partial_dependence()
     permutation_importance, # global importance via shuffling
     ablation_attribution,   # local attribution via baseline replacement
     lime_surrogate_attribution,  # LIME-style weighted linear surrogate
     shap_permutation_attribution, # SHAP-like permutation sampling
-    explain,                # single dispatcher for all four
+    kernel_shap_attribution,     # KernelSHAP: exact Shapley values, small p
+    partial_dependence,     # global PDP / ICE curves for one feature
+    pdp_table,              # plain-text PDP table with ASCII curve
+    explain,                # single dispatcher for all five methods
     ascii_bar_chart, markdown_table, html_report, save_html_report,
+    save_attribution_png, save_pdp_png,  # PNG plots (needs matplotlib)
     make_demo_model, check_model,
 )
 ```
@@ -88,7 +116,9 @@ from explainability_lite import (
 src/explainability_lite/
 ├── __init__.py      # public API
 ├── models.py        # Model protocol, demo model, check_model, metric helpers
-├── attribution.py   # the four attribution methods + explain() dispatcher
+├── attribution.py   # the five attribution methods + explain() dispatcher
+├── effects.py       # partial dependence (PDP) + ICE lines, text tables
+├── plots.py         # PNG plotting helpers (optional matplotlib, Agg backend)
 ├── report.py        # ASCII bars, Markdown tables, standalone HTML/SVG reports
 ├── cli.py           # `explainability-lite` console script
 └── __main__.py      # `python -m explainability_lite`
@@ -97,10 +127,11 @@ src/explainability_lite/
 Everything is model-agnostic by construction: attribution methods only ever
 call `model.predict` on numpy arrays. Baselines default to the reference
 set's median (robust to outliers); all sampling is seeded for reproducibility.
+`kernel_shap` and `partial_dependence` are fully deterministic.
 
 See [docs/usage.md](docs/usage.md) for the full usage guide, including plugging
 in your own model and the methods' caveats.
 
 ## License
 
-MIT — Copyright (c) 2026 Anusha Mukka.
+MIT - Copyright (c) 2026 Anusha Mukka.

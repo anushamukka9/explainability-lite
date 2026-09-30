@@ -38,7 +38,7 @@ def markdown_table(attr: Attribution, *, top_k: int | None = None) -> str:
     """Markdown table of an attribution."""
     ranked = attr.ranked(top_k=top_k)
     lines = [
-        f"### Feature attributions — `{attr.method}`",
+        f"### Feature attributions - `{attr.method}`",
         "",
         f"Prediction: `{_fmt(attr.prediction)}`"
         + (f" · Baseline: `{_fmt(attr.baseline)}`" if attr.baseline is not None else ""),

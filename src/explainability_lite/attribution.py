@@ -5,16 +5,20 @@ All methods work on raw numpy arrays and any object exposing
 
 Methods
 -------
-- :func:`permutation_importance` — global importance: shuffle each feature
+- :func:`permutation_importance` - global importance: shuffle each feature
   in a reference set and measure the score drop.
-- :func:`ablation_attribution` — local importance: replace each feature of a
+- :func:`ablation_attribution` - local importance: replace each feature of a
   single row with its baseline value and measure the prediction change.
-- :func:`lime_surrogate_attribution` — LIME-style: sample perturbed rows
+- :func:`lime_surrogate_attribution` - LIME-style: sample perturbed rows
   around the instance, weight by proximity, fit a linear surrogate, and read
   off the coefficients.
-- :func:`shap_permutation_attribution` — SHAP-like: average marginal
+- :func:`shap_permutation_attribution` - SHAP-like: average marginal
   contributions over random feature-order permutations (approximation of
   Shapley values). Attributions sum to ``f(row) - f(baseline)``.
+- :func:`kernel_shap_attribution` - KernelSHAP: exact Shapley values for
+  small feature sets via the Shapley kernel and constrained least squares.
+  Deterministic; attributions sum to ``f(row) - f(baseline)`` by
+  construction.
 """
 
 from __future__ import annotations
@@ -249,11 +253,101 @@ def shap_permutation_attribution(
                        extra={"n_permutations": n_permutations})
 
 
+def kernel_shap_attribution(
+    model,
+    row: np.ndarray,
+    X_ref: np.ndarray,
+    *,
+    feature_names: list[str] | None = None,
+    baseline: str | np.ndarray = "median",
+    max_features: int = 12,
+) -> Attribution:
+    """KernelSHAP: exact Shapley values for small feature sets.
+
+    Enumerates all ``2 ** p`` feature coalitions (so ``p`` must be small;
+    ``max_features`` guards the exponential cost), weights each coalition
+    with the Shapley kernel, and solves the efficiency-constrained weighted
+    least squares problem. The result is deterministic - no sampling - and
+    the attributions add up to ``f(row) - f(baseline)`` by construction.
+
+    For a linear model this recovers the exact Shapley values
+    ``w_j * (row_j - baseline_j)``.
+    """
+    import itertools
+    import math
+
+    row = np.asarray(row, dtype=float).ravel()
+    X_ref = np.asarray(X_ref, dtype=float)
+    p = row.shape[0]
+    if p > max_features:
+        raise ValueError(
+            f"kernel_shap enumerates 2**p coalitions; p={p} exceeds "
+            f"max_features={max_features}. Use the 'shap' (permutation "
+            f"sampling) method for larger feature sets."
+        )
+    names = feature_names or [f"feature_{i}" for i in range(p)]
+    base_vec = _resolve_baseline(baseline, X_ref)
+
+    def f(v: np.ndarray) -> float:
+        return float(np.asarray(model.predict(v.reshape(1, -1))).ravel()[0])
+
+    f_empty = f(base_vec)
+    f_full = f(row)
+    target_sum = f_full - f_empty
+
+    if p == 1:
+        return Attribution(names, np.array([target_sum]), method="kernel_shap",
+                           prediction=f_full, baseline=f_empty,
+                           extra={"n_coalitions": 2})
+
+    # All coalitions except the empty and full ones; the efficiency
+    # constraint (attributions sum to f(row) - f(baseline)) is enforced
+    # explicitly through the KKT system below.
+    coalitions: list[tuple[tuple[int, ...], float]] = []
+    for size in range(1, p):
+        weight = (p - 1) / (math.comb(p, size) * size * (p - size))
+        for combo in itertools.combinations(range(p), size):
+            coalitions.append((combo, weight))
+
+    n = len(coalitions)
+    design = np.zeros((n, p))
+    targets = np.zeros(n)
+    weights = np.zeros(n)
+    for i, (combo, weight) in enumerate(coalitions):
+        vec = base_vec.copy()
+        vec[list(combo)] = row[list(combo)]
+        design[i, list(combo)] = 1.0
+        targets[i] = f(vec) - f_empty
+        weights[i] = weight
+
+    # Constrained weighted least squares:
+    #   min || W^(1/2) (design @ phi - targets) ||^2  s.t. sum(phi) = target_sum
+    w_design = design * weights[:, None]
+    ata = w_design.T @ design
+    att = w_design.T @ targets
+    ridge = 1e-10 * (np.trace(ata) / p)
+    ata = ata + ridge * np.eye(p)
+
+    kkt = np.zeros((p + 1, p + 1))
+    rhs = np.zeros(p + 1)
+    kkt[:p, :p] = ata
+    kkt[:p, p] = 1.0
+    kkt[p, :p] = 1.0
+    rhs[:p] = att
+    rhs[p] = target_sum
+    phi = np.linalg.solve(kkt, rhs)[:p]
+
+    return Attribution(names, phi, method="kernel_shap",
+                       prediction=f_full, baseline=f_empty,
+                       extra={"n_coalitions": n + 2})
+
+
 _METHODS: dict[str, Callable] = {
     "permutation": permutation_importance,
     "ablation": ablation_attribution,
     "lime": lime_surrogate_attribution,
     "shap": shap_permutation_attribution,
+    "kernel_shap": kernel_shap_attribution,
 }
 
 
@@ -271,7 +365,8 @@ def explain(
     """One entry point for every attribution method.
 
     ``method`` is one of ``permutation`` (global; needs ``y_ref``),
-    ``ablation``, ``lime``, ``shap``. Local methods explain ``row`` against
+    ``ablation``, ``lime``, ``shap``, ``kernel_shap`` (exact Shapley values;
+    needs ``p <= max_features``). Local methods explain ``row`` against
     the reference distribution ``X_ref``.
     """
     if method not in _METHODS:
@@ -281,7 +376,8 @@ def explain(
             raise ValueError("permutation importance needs y_ref")
         return permutation_importance(model, X_ref, y_ref, feature_names=feature_names,
                                       random_state=random_state, **kwargs)
-    # ablation is deterministic (no sampling), so it takes no random_state.
-    method_kwargs = {} if method == "ablation" else {"random_state": random_state}
+    # ablation and kernel_shap are deterministic (no sampling), so they take
+    # no random_state.
+    method_kwargs = {} if method in ("ablation", "kernel_shap") else {"random_state": random_state}
     return _METHODS[method](model, row, X_ref, feature_names=feature_names,
                             **method_kwargs, **kwargs)
